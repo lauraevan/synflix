@@ -3,9 +3,9 @@ import Hls from "hls.js";
 import {
     Play, Pause, Volume2, VolumeX, Maximize, Minimize, SkipForward,
     RotateCcw, RotateCw, Settings, Subtitles, Gauge, PictureInPicture2,
-    Keyboard, Loader2, ChevronLeft, Zap, ServerCog, X, ShieldCheck,
+    Keyboard, ChevronLeft, Zap, ServerCog, X, ShieldCheck, AlertTriangle,
 } from "lucide-react";
-import { getSources, scrapeToken, resolveStream, hlsProxyUrl } from "@/lib/api";
+import { getStreams, hlsProxyUrl } from "@/lib/api";
 import { fmtTime } from "@/lib/format";
 import { saveProgress, getProgress } from "@/lib/storage";
 
@@ -15,10 +15,16 @@ const SHORTCUTS = [
     ["← / →", "Seek ∓5s"], ["J / L", "Seek ∓10s"], ["↑ / ↓", "Volume"],
     ["N", "Next Episode"], ["C", "Subtitles"], ["?", "This help"],
 ];
+const STEPS = [
+    "Fetching VidUp embed…",
+    "Extracting session token ✓",
+    "Scraping mirror servers…",
+    "Relaying HLS through Synapse proxy…",
+];
 
 const Popover = ({ open, children }) =>
     open ? (
-        <div className="absolute bottom-12 right-0 min-w-[180px] rounded-xl bg-[#0a0a10]/95 backdrop-blur-xl border border-white/10 p-1.5 shadow-2xl z-30">
+        <div className="absolute bottom-12 right-0 min-w-[180px] max-h-64 overflow-y-auto scrollbar-none rounded-xl bg-[#0a0a10]/95 backdrop-blur-xl border border-white/10 p-1.5 shadow-2xl z-30">
             {children}
         </div>
     ) : null;
@@ -41,14 +47,11 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
     const hlsRef = useRef(null);
     const hideTimer = useRef(null);
 
-    const [sources, setSources] = useState([]);
-    const [sourceId, setSourceId] = useState("vidup");
-    const [mode, setMode] = useState("resolving"); // resolving | hls | embed
-    const [embedUrl, setEmbedUrl] = useState(null);
-    const [steps, setSteps] = useState([]);
-    const [tokenPreview, setTokenPreview] = useState(null);
-    const [reason, setReason] = useState(null);
-    const [slow, setSlow] = useState(false);
+    const [servers, setServers] = useState([]);
+    const [serverId, setServerId] = useState(null);
+    const [mode, setMode] = useState("loading"); // loading | ready | error
+    const [stepIdx, setStepIdx] = useState(0);
+    const [error, setError] = useState(null);
 
     const [playing, setPlaying] = useState(false);
     const [current, setCurrent] = useState(0);
@@ -62,118 +65,79 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
     const [sub, setSub] = useState(-1);
     const [rate, setRate] = useState(1);
     const [fs, setFs] = useState(false);
+    const [buffering, setBuffering] = useState(true);
     const [showControls, setShowControls] = useState(true);
-    const [menu, setMenu] = useState(null); // 'quality'|'subs'|'speed'|null
+    const [menu, setMenu] = useState(null);
     const [help, setHelp] = useState(false);
     const [ripple, setRipple] = useState(null);
 
-    const addStep = (s) => setSteps((p) => [...p, s]);
+    const activeServer = servers.find((s) => s.id === serverId);
 
-    // ---------- source resolution ----------
-    const attachHls = useCallback((proxiedUrl) => {
+    const playServer = useCallback((server) => {
         const video = videoRef.current;
-        if (!video) return;
+        if (!video || !server) return;
+        setBuffering(true);
+        setLevels([]); setLevel(-1); setSubs([]); setSub(-1);
         if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
-        const url = hlsProxyUrl(proxiedUrl);
-        if (Hls.isSupported()) {
-            const hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+        const url = hlsProxyUrl(server.play_url);
+        if (server.type === "hls" && Hls.isSupported()) {
+            const hls = new Hls({ enableWorker: true, maxBufferLength: 30 });
             hlsRef.current = hls;
             hls.loadSource(url);
             hls.attachMedia(video);
-            hls.on(Hls.Events.MANIFEST_PARSED, () => {
-                setLevels(hls.levels || []);
-                video.play().catch(() => {});
-            });
+            hls.on(Hls.Events.MANIFEST_PARSED, () => { setLevels(hls.levels || []); video.play().catch(() => {}); });
             hls.on(Hls.Events.SUBTITLE_TRACKS_UPDATED, (_e, d) => setSubs(d.subtitleTracks || []));
-            hls.on(Hls.Events.ERROR, (_e, data) => {
-                if (data.fatal) { setReason("HLS playback error — try a mirror"); fallbackEmbed(); }
-            });
-        } else if (video.canPlayType("application/vnd.apple.mpegurl")) {
+            hls.on(Hls.Events.LEVEL_SWITCHED, (_e, d) => setLevel(hls.autoLevelEnabled ? -1 : d.level));
+            hls.on(Hls.Events.ERROR, (_e, data) => { if (data.fatal) tryNext(server.id); });
+        } else {
             video.src = url;
             video.play().catch(() => {});
         }
-    }, []); // eslint-disable-line
+    }, [servers]); // eslint-disable-line
 
-    const fallbackEmbed = useCallback(() => {
-        const src = sources.find((s) => s.id === sourceId) || sources[0];
-        if (src) { setEmbedUrl(src.embed_url); setMode("embed"); }
-    }, [sources, sourceId]);
+    const tryNext = useCallback((failedId) => {
+        const idx = servers.findIndex((s) => s.id === failedId);
+        const next = servers[idx + 1];
+        if (next) { setServerId(next.id); playServer(next); }
+        else setError("All scraped servers failed to play. Try another title.");
+    }, [servers, playServer]);
 
-    const decrypt = useCallback(async () => {
-        setMode("resolving"); setSteps([]); setReason(null); setSlow(false);
-        const timers = [];
-        addStep("Fetching VidUp embed page…");
-        try {
-            const tk = await scrapeToken(mediaType, id, season, episode);
-            if (tk.token_preview) {
-                setTokenPreview(tk.token_preview);
-                addStep(`Extracted en session token ✓`);
-            } else {
-                addStep("Token not found");
-            }
-            addStep("Booting client VM · decrypting catalog…");
-            const slowT = setTimeout(() => setSlow(true), 11000);
-            timers.push(slowT);
-            const res = await resolveStream(mediaType, id, season, episode);
-            clearTimeout(slowT);
-            if (res.ok && res.play_url) {
-                addStep("Stream decrypted ✓");
-                setMode("hls");
-                setTimeout(() => attachHls(res.play_url), 50);
-            } else {
-                setReason(res.reason || "Could not resolve stream");
-                addStep("Anti-bot blocked server-side resolve — using mirror");
-                setTimeout(fallbackEmbed, 400);
-            }
-        } catch (e) {
-            setReason("Resolve failed");
-            setTimeout(fallbackEmbed, 300);
-        } finally {
-            timers.forEach(clearTimeout);
-        }
-    }, [mediaType, id, season, episode, attachHls, fallbackEmbed]);
-
-    // load sources
+    // scrape servers
     useEffect(() => {
         let alive = true;
-        getSources(mediaType, id, season, episode).then((d) => {
-            if (!alive) return;
-            setSources(d.sources || []);
-        });
-        return () => { alive = false; };
+        setMode("loading"); setStepIdx(0); setError(null);
+        const tick = setInterval(() => setStepIdx((i) => Math.min(i + 1, STEPS.length - 1)), 900);
+        getStreams(mediaType, id, season, episode)
+            .then((d) => {
+                if (!alive) return;
+                clearInterval(tick);
+                const list = d.servers || [];
+                setServers(list);
+                if (list.length) {
+                    setServerId(list[0].id);
+                    setMode("ready");
+                } else {
+                    setMode("error");
+                    setError("No streams could be scraped for this title yet.");
+                }
+            })
+            .catch(() => { if (alive) { clearInterval(tick); setMode("error"); setError("Scraper request failed."); } });
+        return () => { alive = false; clearInterval(tick); };
     }, [mediaType, id, season, episode]);
 
-    // once sources ready, kick off default (vidup embed instantly + attempt decrypt)
+    // when ready + server chosen, start playback
     useEffect(() => {
-        if (!sources.length) return;
-        // default: show vidup embed immediately so playback is instant for the user,
-        // while we attempt a server-side decrypt into the custom player.
-        const vidup = sources.find((s) => s.id === "vidup") || sources[0];
-        setEmbedUrl(vidup.embed_url);
-        decrypt();
+        if (mode === "ready" && activeServer && videoRef.current) playServer(activeServer);
         // eslint-disable-next-line
-    }, [sources.length]);
+    }, [mode, serverId, servers.length]);
 
-    const selectSource = (src) => {
-        setSourceId(src.id);
-        setMenu(null);
-        if (hlsRef.current) { hlsRef.current.destroy(); hlsRef.current = null; }
-        if (src.resolvable) {
-            decrypt();
-        } else {
-            setEmbedUrl(src.embed_url);
-            setMode("embed");
-        }
-    };
+    const selectServer = (s) => { setMenu(null); setServerId(s.id); playServer(s); };
 
-    // ---------- video element wiring ----------
+    // video wiring
     useEffect(() => {
         const v = videoRef.current;
-        if (!v || mode !== "hls") return;
-        const onTime = () => {
-            setCurrent(v.currentTime);
-            if (v.buffered.length) setBuffered(v.buffered.end(v.buffered.length - 1));
-        };
+        if (!v) return;
+        const onTime = () => { setCurrent(v.currentTime); if (v.buffered.length) setBuffered(v.buffered.end(v.buffered.length - 1)); };
         const onMeta = () => {
             setDuration(v.duration);
             const p = getProgress(mediaType, id, season, episode);
@@ -182,79 +146,61 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
         const onPlay = () => setPlaying(true);
         const onPause = () => setPlaying(false);
         const onVol = () => { setVolume(v.volume); setMuted(v.muted); };
+        const onWait = () => setBuffering(true);
+        const onPlaying = () => setBuffering(false);
         v.addEventListener("timeupdate", onTime);
         v.addEventListener("loadedmetadata", onMeta);
         v.addEventListener("play", onPlay);
         v.addEventListener("pause", onPause);
         v.addEventListener("volumechange", onVol);
+        v.addEventListener("waiting", onWait);
+        v.addEventListener("playing", onPlaying);
+        v.addEventListener("canplay", onPlaying);
         return () => {
-            v.removeEventListener("timeupdate", onTime);
-            v.removeEventListener("loadedmetadata", onMeta);
-            v.removeEventListener("play", onPlay);
-            v.removeEventListener("pause", onPause);
-            v.removeEventListener("volumechange", onVol);
+            v.removeEventListener("timeupdate", onTime); v.removeEventListener("loadedmetadata", onMeta);
+            v.removeEventListener("play", onPlay); v.removeEventListener("pause", onPause);
+            v.removeEventListener("volumechange", onVol); v.removeEventListener("waiting", onWait);
+            v.removeEventListener("playing", onPlaying); v.removeEventListener("canplay", onPlaying);
         };
     }, [mode, mediaType, id, season, episode]);
 
-    // persist progress
     useEffect(() => {
-        if (mode !== "hls" || !duration) return;
+        if (!duration) return;
         const t = setInterval(() => {
-            const v = videoRef.current;
-            if (!v) return;
-            saveProgress({
-                media_type: mediaType, id, title: meta.title, poster_path: meta.poster_path,
-                backdrop_path: meta.backdrop_path, season, episode,
-                position: v.currentTime, duration: v.duration,
-            });
+            const v = videoRef.current; if (!v) return;
+            saveProgress({ media_type: mediaType, id, title: meta.title, poster_path: meta.poster_path,
+                backdrop_path: meta.backdrop_path, season, episode, position: v.currentTime, duration: v.duration });
         }, 5000);
         return () => clearInterval(t);
-    }, [mode, duration, mediaType, id, season, episode, meta]);
+    }, [duration, mediaType, id, season, episode, meta]);
 
     useEffect(() => {
         const onFs = () => setFs(!!document.fullscreenElement);
         document.addEventListener("fullscreenchange", onFs);
         return () => document.removeEventListener("fullscreenchange", onFs);
     }, []);
-
     useEffect(() => () => { if (hlsRef.current) hlsRef.current.destroy(); }, []);
 
-    // ---------- controls ----------
-    const togglePlay = () => {
-        const v = videoRef.current; if (!v) return;
-        if (v.paused) v.play(); else v.pause();
-    };
+    const togglePlay = () => { const v = videoRef.current; if (!v) return; if (v.paused) v.play(); else v.pause(); };
     const seekBy = (d) => { const v = videoRef.current; if (v) v.currentTime = Math.max(0, Math.min(v.duration || 0, v.currentTime + d)); showRipple(d > 0 ? "fwd" : "back"); };
     const seekTo = (val) => { const v = videoRef.current; if (v && duration) v.currentTime = (val / 100) * duration; };
     const setVol = (val) => { const v = videoRef.current; if (v) { v.volume = val; v.muted = val === 0; } };
     const toggleMute = () => { const v = videoRef.current; if (v) v.muted = !v.muted; };
-    const changeLevel = (i) => { if (hlsRef.current) hlsRef.current.currentLevel = i; setLevel(i); setMenu(null); };
+    const changeLevel = (i) => { if (hlsRef.current) { hlsRef.current.currentLevel = i; } setLevel(i); setMenu(null); };
     const changeSub = (i) => { if (hlsRef.current) hlsRef.current.subtitleTrack = i; setSub(i); setMenu(null); };
     const changeRate = (r) => { const v = videoRef.current; if (v) v.playbackRate = r; setRate(r); setMenu(null); };
-    const togglePip = async () => {
-        const v = videoRef.current; if (!v) return;
-        try {
-            if (document.pictureInPictureElement) await document.exitPictureInPicture();
-            else await v.requestPictureInPicture();
-        } catch { /* not supported */ }
-    };
-    const toggleFs = () => {
-        const el = containerRef.current; if (!el) return;
-        if (document.fullscreenElement) document.exitFullscreen();
-        else el.requestFullscreen().catch(() => {});
-    };
+    const togglePip = async () => { const v = videoRef.current; if (!v) return; try { if (document.pictureInPictureElement) await document.exitPictureInPicture(); else await v.requestPictureInPicture(); } catch { /* noop */ } };
+    const toggleFs = () => { const el = containerRef.current; if (!el) return; if (document.fullscreenElement) document.exitFullscreen(); else el.requestFullscreen().catch(() => {}); };
     const showRipple = (dir) => { setRipple(dir); setTimeout(() => setRipple(null), 500); };
 
-    // autohide
     const wake = useCallback(() => {
         setShowControls(true);
         clearTimeout(hideTimer.current);
         hideTimer.current = setTimeout(() => { if (playing) { setShowControls(false); setMenu(null); } }, 3200);
     }, [playing]);
 
-    // keyboard
     useEffect(() => {
-        if (mode !== "hls") return;
+        if (mode !== "ready") return;
         const onKey = (e) => {
             if (["INPUT", "TEXTAREA"].includes(e.target.tagName)) return;
             const k = e.key.toLowerCase();
@@ -276,7 +222,7 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
 
     const pct = duration ? (current / duration) * 100 : 0;
     const bufPct = duration ? (buffered / duration) * 100 : 0;
-    const srcName = sources.find((s) => s.id === sourceId)?.name || "VidUp";
+    const srcName = activeServer?.name || "VidUp";
 
     return (
         <div
@@ -286,65 +232,56 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
             onClick={() => menu && setMenu(null)}
             className="relative w-full aspect-video bg-black rounded-2xl overflow-hidden shadow-[0_0_60px_rgba(229,9,20,0.12)] border border-white/5 select-none"
         >
-            {/* ---- video / embed surface ---- */}
-            {mode === "hls" ? (
-                <video
-                    ref={videoRef}
-                    data-testid="synapse-video-element"
-                    className="w-full h-full bg-black"
-                    onClick={(e) => { e.stopPropagation(); togglePlay(); wake(); }}
-                    onDoubleClick={toggleFs}
-                    playsInline
-                />
-            ) : mode === "embed" && embedUrl ? (
-                <iframe
-                    data-testid="synapse-embed-frame"
-                    title="Synapse embed"
-                    src={embedUrl}
-                    className="w-full h-full"
-                    allow="autoplay; encrypted-media; fullscreen; picture-in-picture"
-                    allowFullScreen
-                    referrerPolicy="origin"
-                />
-            ) : null}
+            <video
+                ref={videoRef}
+                data-testid="synapse-video-element"
+                className="w-full h-full bg-black"
+                onClick={(e) => { e.stopPropagation(); togglePlay(); wake(); }}
+                onDoubleClick={toggleFs}
+                playsInline
+                crossOrigin="anonymous"
+            />
 
-            {/* ---- resolving overlay ---- */}
-            {mode === "resolving" && (
-                <div data-testid="synapse-resolving" className="absolute inset-0 flex flex-col items-center justify-center bg-obsidian/85 backdrop-blur-sm z-20 px-6">
-                    <div className="relative w-20 h-20 mb-6">
+            {/* buffering spinner */}
+            {mode === "ready" && buffering && !menu && (
+                <div className="absolute inset-0 flex items-center justify-center pointer-events-none z-10">
+                    <div className="relative w-16 h-16">
                         <span className="absolute inset-0 rounded-full border-2 border-crimson syn-radar-ring" />
-                        <span className="absolute inset-0 rounded-full border-2 border-crimson syn-radar-ring" style={{ animationDelay: "0.5s" }} />
-                        <div className="absolute inset-0 flex items-center justify-center">
-                            <Zap className="w-8 h-8 text-crimson" />
-                        </div>
+                        <div className="absolute inset-0 flex items-center justify-center"><Zap className="w-6 h-6 text-crimson" /></div>
                     </div>
-                    <p className="font-display text-2xl tracking-wide mb-1">SYNAPSE ENGINE</p>
-                    <p className="text-xs uppercase tracking-[0.25em] text-amber-glow mb-5">Decrypting {srcName} stream</p>
-                    <div className="w-full max-w-md space-y-1.5 font-mono text-xs text-zinc-400">
-                        {steps.map((s, i) => (
-                            <div key={i} className="flex items-center gap-2 syn-fade-up">
-                                <span className="text-crimson">›</span> {s}
-                            </div>
-                        ))}
-                        {tokenPreview && (
-                            <div className="flex items-center gap-2 text-emerald-400 pt-1">
-                                <ShieldCheck className="w-3.5 h-3.5" /> en={tokenPreview}
-                            </div>
-                        )}
-                    </div>
-                    {slow && (
-                        <button
-                            data-testid="synapse-skip-to-mirror"
-                            onClick={fallbackEmbed}
-                            className="mt-6 px-5 py-2.5 rounded-full bg-white text-black font-semibold text-sm hover:bg-white/85 active:scale-95 transition-all"
-                        >
-                            Taking a while — Play instant mirror →
-                        </button>
-                    )}
                 </div>
             )}
 
-            {/* seek ripples */}
+            {/* scraping overlay */}
+            {mode === "loading" && (
+                <div data-testid="synapse-resolving" className="absolute inset-0 flex flex-col items-center justify-center bg-obsidian/90 backdrop-blur-sm z-20 px-6">
+                    <div className="relative w-20 h-20 mb-6">
+                        <span className="absolute inset-0 rounded-full border-2 border-crimson syn-radar-ring" />
+                        <span className="absolute inset-0 rounded-full border-2 border-crimson syn-radar-ring" style={{ animationDelay: "0.5s" }} />
+                        <div className="absolute inset-0 flex items-center justify-center"><Zap className="w-8 h-8 text-crimson" /></div>
+                    </div>
+                    <p className="font-display text-2xl tracking-wide mb-1">SYNAPSE ENGINE</p>
+                    <p className="text-xs uppercase tracking-[0.25em] text-amber-glow mb-5">Scraping streams</p>
+                    <div className="w-full max-w-md space-y-1.5 font-mono text-xs text-zinc-400">
+                        {STEPS.slice(0, stepIdx + 1).map((s, i) => (
+                            <div key={i} className="flex items-center gap-2 syn-fade-up">
+                                {i < stepIdx ? <ShieldCheck className="w-3.5 h-3.5 text-emerald-400" /> : <span className="text-crimson">›</span>} {s}
+                            </div>
+                        ))}
+                    </div>
+                </div>
+            )}
+
+            {/* error */}
+            {mode === "error" && (
+                <div data-testid="synapse-error" className="absolute inset-0 flex flex-col items-center justify-center bg-obsidian/90 z-20 px-6 text-center">
+                    <AlertTriangle className="w-10 h-10 text-amber-glow mb-3" />
+                    <p className="font-semibold mb-1">Couldn't scrape a stream</p>
+                    <p className="text-sm text-zinc-400 max-w-sm">{error}</p>
+                    <button onClick={onBack} className="mt-5 px-5 py-2.5 rounded-full bg-white text-black font-semibold text-sm">Go back</button>
+                </div>
+            )}
+
             {ripple && (
                 <div className={`absolute top-1/2 -translate-y-1/2 ${ripple === "fwd" ? "right-16" : "left-16"} z-20 pointer-events-none`}>
                     <div className="w-16 h-16 rounded-full bg-white/10 flex items-center justify-center syn-fade-up">
@@ -353,8 +290,8 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
                 </div>
             )}
 
-            {/* ---- TOP CHROME (always) ---- */}
-            <div className={`absolute top-0 left-0 right-0 z-20 p-4 md:p-5 bg-gradient-to-b from-black/80 to-transparent flex items-start gap-3 transition-opacity duration-300 ${showControls || mode !== "hls" ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
+            {/* TOP CHROME */}
+            <div className={`absolute top-0 left-0 right-0 z-20 p-4 md:p-5 bg-gradient-to-b from-black/80 to-transparent flex items-start gap-3 transition-opacity duration-300 ${showControls || mode !== "ready" ? "opacity-100" : "opacity-0 pointer-events-none"}`}>
                 <button data-testid="synapse-back-btn" onClick={onBack} className="w-10 h-10 shrink-0 rounded-full bg-black/40 border border-white/10 flex items-center justify-center hover:bg-crimson transition-colors">
                     <ChevronLeft className="w-5 h-5" />
                 </button>
@@ -364,19 +301,16 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
                         {mediaType === "tv" ? `S${season} · E${episode}` : "Movie"} · via <span className="text-amber-glow">{srcName}</span>
                     </p>
                 </div>
-                {/* source switcher */}
-                <div className="ml-auto flex items-center gap-2 flex-wrap justify-end">
-                    <span className="hidden sm:flex items-center gap-1 text-[11px] text-zinc-400"><ServerCog className="w-3.5 h-3.5" /> Sources</span>
+                <div className="ml-auto flex items-center gap-2 flex-wrap justify-end max-w-[60%]">
+                    <span className="hidden sm:flex items-center gap-1 text-[11px] text-zinc-400"><ServerCog className="w-3.5 h-3.5" /> {servers.length} servers</span>
                     <div data-testid="synapse-source-selector" className="flex items-center gap-1.5 flex-wrap justify-end">
-                        {sources.map((s) => (
+                        {servers.map((s) => (
                             <button
                                 key={s.id}
                                 data-testid={`synapse-source-${s.id}`}
-                                onClick={(e) => { e.stopPropagation(); selectSource(s); }}
+                                onClick={(e) => { e.stopPropagation(); selectServer(s); }}
                                 className={`px-3 py-1.5 rounded-full text-xs font-semibold border transition-all active:scale-95 ${
-                                    sourceId === s.id
-                                        ? "bg-crimson border-crimson text-white"
-                                        : "bg-black/40 border-white/10 text-zinc-300 hover:border-white/40"
+                                    serverId === s.id ? "bg-crimson border-crimson text-white" : "bg-black/40 border-white/10 text-zinc-300 hover:border-white/40"
                                 }`}
                                 title={s.primary ? "Primary source" : "Mirror"}
                             >
@@ -387,27 +321,12 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
                 </div>
             </div>
 
-            {/* embed-mode helper: decrypt into custom player */}
-            {mode === "embed" && (
-                <div className="absolute bottom-4 left-1/2 -translate-x-1/2 z-20 flex flex-col items-center gap-2">
-                    {reason && <p className="text-[11px] text-zinc-400 bg-black/60 px-3 py-1 rounded-full">{reason}</p>}
-                    <button
-                        data-testid="synapse-decrypt-btn"
-                        onClick={(e) => { e.stopPropagation(); setSourceId("vidup"); decrypt(); }}
-                        className="flex items-center gap-2 px-5 py-2.5 rounded-full bg-crimson hover:bg-crimson/85 active:scale-95 transition-all font-semibold text-sm shadow-lg shadow-crimson/30"
-                    >
-                        <Zap className="w-4 h-4" /> Try Synapse HD Decrypt
-                    </button>
-                </div>
-            )}
-
-            {/* ---- BOTTOM CONTROL BAR (HLS mode) ---- */}
-            {mode === "hls" && (
+            {/* BOTTOM CONTROL BAR */}
+            {mode === "ready" && (
                 <div
                     onClick={(e) => e.stopPropagation()}
                     className={`absolute bottom-0 left-0 right-0 z-20 px-4 md:px-6 pb-3 pt-10 bg-gradient-to-t from-black/95 via-black/60 to-transparent transition-opacity duration-300 ${showControls ? "opacity-100" : "opacity-0 pointer-events-none"}`}
                 >
-                    {/* scrubber */}
                     <div className="group/seek relative mb-3">
                         <div className="relative h-1.5 rounded-full bg-white/20 overflow-hidden">
                             <div className="absolute h-full bg-white/25" style={{ width: `${bufPct}%` }} />
@@ -417,9 +336,7 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
                             data-testid="synapse-seek-bar"
                             type="range" min="0" max="100" step="0.1" value={pct}
                             onChange={(e) => seekTo(parseFloat(e.target.value))}
-                            className="syn-range absolute inset-0 w-full opacity-0 group-hover/seek:opacity-100 h-1.5"
-                            style={{ opacity: 0 }}
-                            aria-label="Seek"
+                            className="syn-range absolute inset-0 w-full h-1.5" style={{ opacity: 0 }} aria-label="Seek"
                         />
                         <div className="absolute -top-1 w-3 h-3 rounded-full bg-crimson shadow-[0_0_10px_rgba(229,9,20,0.9)] -translate-x-1/2 pointer-events-none" style={{ left: `${pct}%` }} />
                     </div>
@@ -435,13 +352,9 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
                             <button data-testid="synapse-mute-btn" onClick={toggleMute} className="hover:text-crimson transition-colors active:scale-90">
                                 {muted || volume === 0 ? <VolumeX className="w-5 h-5" /> : <Volume2 className="w-5 h-5" />}
                             </button>
-                            <input
-                                data-testid="synapse-volume-slider"
-                                type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume}
+                            <input data-testid="synapse-volume-slider" type="range" min="0" max="1" step="0.05" value={muted ? 0 : volume}
                                 onChange={(e) => setVol(parseFloat(e.target.value))}
-                                className="syn-range w-0 group-hover/vol:w-20 transition-all duration-300 ml-1 h-1"
-                                aria-label="Volume"
-                            />
+                                className="syn-range w-0 group-hover/vol:w-20 transition-all duration-300 ml-1 h-1" aria-label="Volume" />
                         </div>
 
                         <span data-testid="synapse-time" className="font-mono text-xs text-zinc-300 ml-1">
@@ -454,44 +367,31 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
                                     <SkipForward className="w-5 h-5" /> <span className="hidden md:inline">Next</span>
                                 </button>
                             )}
-
-                            {/* subtitles */}
                             <div className="relative">
                                 <button data-testid="synapse-subtitles-menu" onClick={() => setMenu(menu === "subs" ? null : "subs")} className={`hover:text-crimson transition-colors active:scale-90 ${sub >= 0 ? "text-crimson" : ""}`} title="Subtitles (C)"><Subtitles className="w-5 h-5" /></button>
                                 <Popover open={menu === "subs"}>
                                     <p className="px-3 py-1 text-[10px] uppercase tracking-widest text-zinc-500">Subtitles</p>
                                     <MenuItem active={sub === -1} onClick={() => changeSub(-1)} testId="sub-off">Off</MenuItem>
-                                    {subs.map((t, i) => (
-                                        <MenuItem key={i} active={sub === i} onClick={() => changeSub(i)}>{t.name || t.lang || `Track ${i + 1}`}</MenuItem>
-                                    ))}
+                                    {subs.map((t, i) => (<MenuItem key={i} active={sub === i} onClick={() => changeSub(i)}>{t.name || t.lang || `Track ${i + 1}`}</MenuItem>))}
                                     {!subs.length && <p className="px-3 py-2 text-xs text-zinc-500">No tracks in this stream</p>}
                                 </Popover>
                             </div>
-
-                            {/* quality */}
                             <div className="relative">
                                 <button data-testid="synapse-quality-menu" onClick={() => setMenu(menu === "quality" ? null : "quality")} className="hover:text-crimson transition-colors active:scale-90" title="Quality"><Settings className="w-5 h-5" /></button>
                                 <Popover open={menu === "quality"}>
                                     <p className="px-3 py-1 text-[10px] uppercase tracking-widest text-zinc-500">Quality</p>
                                     <MenuItem active={level === -1} onClick={() => changeLevel(-1)} testId="quality-auto">Auto</MenuItem>
-                                    {levels.map((l, i) => (
-                                        <MenuItem key={i} active={level === i} onClick={() => changeLevel(i)}>{l.height ? `${l.height}p` : `${Math.round(l.bitrate / 1000)}k`}</MenuItem>
-                                    ))}
-                                    {!levels.length && <p className="px-3 py-2 text-xs text-zinc-500">Single quality</p>}
+                                    {levels.map((l, i) => (<MenuItem key={i} active={level === i} onClick={() => changeLevel(i)}>{l.height ? `${l.height}p` : `${Math.round(l.bitrate / 1000)}k`}</MenuItem>))}
+                                    {!levels.length && <p className="px-3 py-2 text-xs text-zinc-500">Single quality · switch server</p>}
                                 </Popover>
                             </div>
-
-                            {/* speed */}
                             <div className="relative">
                                 <button data-testid="synapse-speed-menu" onClick={() => setMenu(menu === "speed" ? null : "speed")} className="hover:text-crimson transition-colors active:scale-90" title="Playback speed"><Gauge className="w-5 h-5" /></button>
                                 <Popover open={menu === "speed"}>
                                     <p className="px-3 py-1 text-[10px] uppercase tracking-widest text-zinc-500">Speed</p>
-                                    {SPEEDS.map((r) => (
-                                        <MenuItem key={r} active={rate === r} onClick={() => changeRate(r)}>{r === 1 ? "Normal" : `${r}x`}</MenuItem>
-                                    ))}
+                                    {SPEEDS.map((r) => (<MenuItem key={r} active={rate === r} onClick={() => changeRate(r)}>{r === 1 ? "Normal" : `${r}x`}</MenuItem>))}
                                 </Popover>
                             </div>
-
                             <button onClick={togglePip} className="hidden md:block hover:text-crimson transition-colors active:scale-90" title="Picture in Picture"><PictureInPicture2 className="w-5 h-5" /></button>
                             <button data-testid="synapse-help-btn" onClick={() => setHelp(true)} className="hidden md:block hover:text-crimson transition-colors active:scale-90" title="Shortcuts (?)"><Keyboard className="w-5 h-5" /></button>
                             <button data-testid="synapse-fullscreen-btn" onClick={toggleFs} className="hover:text-crimson transition-colors active:scale-90" title="Fullscreen (F)">
@@ -502,7 +402,6 @@ export const SynapsePlayer = ({ mediaType, id, meta = {}, season, episode, onNex
                 </div>
             )}
 
-            {/* shortcuts help */}
             {help && (
                 <div className="absolute inset-0 z-30 bg-obsidian/90 backdrop-blur-md flex items-center justify-center p-6" onClick={() => setHelp(false)}>
                     <div className="bg-[#0f0f14] border border-white/10 rounded-2xl p-6 max-w-md w-full" onClick={(e) => e.stopPropagation()}>

@@ -11,7 +11,6 @@ import os
 import re
 import time
 
-from providers.vixsrc import VixSrcResolver
 from providers.vidlink import VidlinkResolver
 from providers.vidnest import VidNestResolver
 from providers.castle import CastleResolver
@@ -27,9 +26,8 @@ USER_AGENT = os.environ.get(
 
 # Friendly Synflix server names -> resolver classes, in priority order.
 PROVIDERS = [
-    ("VidUp", "vixsrc", VixSrcResolver),      # primary, cleanest HLS
-    ("Nova", "vidlink", VidLinkResolver),
-    ("Orbit", "castle", CastleResolver),
+    ("Orbit", "castle", CastleResolver),      # primary
+    ("Nova", "vidlink", VidlinkResolver),
     ("Nest", "vidnest", VidNestResolver),
     ("Zen", "vidzee", VidzeeResolver),
     ("Rock", "vidrock", VidrockResolver),
@@ -103,7 +101,7 @@ async def scrape_streams(media_type: str, tmdb_id, season=None, episode=None) ->
                 "id": f"{pid}-{idx}",
                 "name": name if idx == 0 else f"{name} {idx + 1}",
                 "provider": pid,
-                "primary": pid == "vixsrc",
+                "primary": pid == "castle",
                 **s,
             })
 

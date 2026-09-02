@@ -1,0 +1,151 @@
+{
+  "project_name": "Synflix & Synapse Player",
+  "archetype": "Luxury Dark Cinematic + Tech Cyber-Precision (Netflix x Vidfast.vc)",
+  "theme": "Dark Cinematic",
+  "brand_identity": {
+    "app_name": "Synflix",
+    "player_subbrand": "Synapse Player",
+    "tagline": "Next-Gen Ultra-Fluid Cinema Engine",
+    "vibe": "Deep Obsidian, Kinetic Amber & Neon Crimson, High-Contrast Typography, Studio Glass Chrome"
+  },
+  "typography": {
+    "font_family_heading": "Bebas Neue, Outfit, sans-serif",
+    "font_family_body": "Outfit, Manrope, sans-serif",
+    "font_family_mono": "JetBrains Mono, monospace",
+    "hierarchy": {
+      "h1_hero": "text-4xl sm:text-5xl lg:text-6xl font-black tracking-tight leading-none uppercase",
+      "h2_section": "text-2xl sm:text-3xl lg:text-4xl font-extrabold tracking-tight",
+      "h3_card_title": "text-lg sm:text-xl font-bold tracking-normal",
+      "body_regular": "text-sm sm:text-base font-normal leading-relaxed text-zinc-300",
+      "overline_label": "text-xs font-semibold uppercase tracking-[0.2em] text-amber-500",
+      "player_time_mono": "text-xs font-mono font-medium tracking-wider text-zinc-300"
+    }
+  },
+  "colors": {
+    "background_main": "#070709",
+    "background_surface": "#0f0f14",
+    "background_card": "#14141d",
+    "background_player_chrome": "rgba(10, 10, 16, 0.85)",
+    "primary_accent": "#E50914",
+    "secondary_glow": "#FF8A00",
+    "cyber_cyan": "#00F0FF",
+    "text_primary": "#F4F4F6",
+    "text_secondary": "#A1A1AA",
+    "border_subtle": "rgba(255, 255, 255, 0.08)",
+    "border_active": "rgba(229, 9, 20, 0.5)",
+    "gradients": {
+      "hero_vignette": "linear-gradient(to top, #070709 0%, rgba(7,7,9,0.7) 40%, rgba(7,7,9,0.2) 80%, transparent 100%)",
+      "hero_sidebar": "linear-gradient(to right, #070709 0%, rgba(7,7,9,0.8) 35%, transparent 100%)",
+      "player_control_mask": "linear-gradient(to top, rgba(5,5,8,0.95) 0%, rgba(5,5,8,0.6) 60%, transparent 100%)",
+      "accent_btn": "linear-gradient(135deg, #E50914 0%, #B20710 100%)"
+    }
+  },
+  "layout_and_grid": {
+    "hero_banner": {
+      "height": "h-[75vh] min-h-[500px] max-h-[750px]",
+      "content_alignment": "left-aligned, optical offset with max-w-2xl px-6 lg:px-16",
+      "backdrop_overlay": "bg-gradient-to-t from-[#070709] via-[#070709]/60 to-transparent"
+    },
+    "rails": {
+      "container_padding": "px-4 md:px-12 py-6",
+      "card_aspect_ratio": "aspect-[2/3]",
+      "card_width": "w-[150px] sm:w-[180px] md:w-[215px]",
+      "scroll_behavior": "snap-x snap-mandatory overflow-x-auto scrollbar-none flex gap-4 md:gap-6 pb-4"
+    },
+    "player_view": {
+      "aspect_ratio": "aspect-video w-full max-w-7xl mx-auto rounded-2xl overflow-hidden shadow-[0_0_50px_rgba(229,9,20,0.15)] bg-black relative"
+    }
+  },
+  "custom_synapse_player_gui": {
+    "description": "Vidfast.vc inspired custom control surface over HLS engine & embed mirror canvas",
+    "components": [
+      {
+        "name": "Top Header Bar",
+        "elements": [
+          "Back button to catalog",
+          "Title & Episode Metadata badge",
+          "Source / Mirror Switcher Pill (VidUp [Primary], VidCloud, SuperStream, FastEmbed)",
+          "Settings Gear Modal Trigger"
+        ]
+      },
+      {
+        "name": "Center Interactive Area",
+        "elements": [
+          "Large Animated Play/Pause pulse on double-tap/click",
+          "Center Loading Radar/Spinner during stream decryption/buffering",
+          "Quick 10s Backward / 10s Forward visual ripples"
+        ]
+      },
+      {
+        "name": "Bottom Controls Bar (Glassmorphic)",
+        "style": "backdrop-blur-xl bg-[#0a0a10]/85 border-t border-white/10 px-6 py-3 rounded-b-2xl",
+        "elements": [
+          "Custom Progress Scrubber: Animated progress bar, hover preview timestamp tooltip, buffered track indicator, red scrub knob",
+          "Primary Play/Pause toggle with smooth scale transition",
+          "Skip -10s / +10s buttons",
+          "Next Episode Quick Trigger (for TV shows)",
+          "Time Display: current / total duration (mono font)",
+          "Volume Control: Mute toggle + horizontal hover volume slider",
+          "Subtitles & Captions Menu Popup (Off, English, Spanish, French, Auto-translate)",
+          "Quality Selector Popup (Auto 1080p, 1080p, 720p, 480p, 360p)",
+          "Playback Speed Switcher (0.5x, 1.0x, 1.25x, 1.5x, 2.0x)",
+          "Picture-in-Picture (PiP) toggle",
+          "Keyboard Shortcuts Help Dialog toggle",
+          "Fullscreen toggle"
+        ]
+      },
+      {
+        "name": "Keyboard Shortcuts",
+        "shortcuts": [
+          "Space/K = Play/Pause",
+          "F = Fullscreen",
+          "M = Mute/Unmute",
+          "Left/Right Arrow = Seek -5s / +5s",
+          "J/L = Seek -10s / +10s",
+          "Up/Down Arrow = Volume +10% / -10%",
+          "N = Next Episode",
+          "C = Subtitles toggle"
+        ]
+      }
+    ]
+  },
+  "motion_and_interactions": {
+    "poster_card_hover": "transform hover:scale-105 transition-all duration-300 hover:z-30 hover:shadow-[0_12px_30px_rgba(0,0,0,0.8)] rounded-xl overflow-hidden border border-transparent hover:border-zinc-700",
+    "hero_transition": "smooth cross-fade transition on background image and title text",
+    "player_controls_idle_autohide": "autohide controls after 3 seconds of inactivity during playback",
+    "button_press": "active:scale-95 transition-transform duration-150"
+  },
+  "media_assets": {
+    "fallback_hero_backdrop": "https://images.unsplash.com/photo-1560176898-fac819f4302f?crop=entropy&cs=srgb&fm=jpg&q=85",
+    "cinema_ambiance": "https://images.unsplash.com/photo-1702322919319-870f20e5db98?crop=entropy&cs=srgb&fm=jpg&q=85"
+  },
+  "accessibility_and_testing": {
+    "data_testid_convention": "kebab-case functional identifiers",
+    "mandatory_ids": [
+      "navbar-brand-synflix",
+      "navbar-search-input",
+      "hero-play-button",
+      "hero-watchlist-button",
+      "movie-card-{id}",
+      "movie-card-play-btn-{id}",
+      "synapse-player-container",
+      "synapse-video-element",
+      "synapse-play-pause-btn",
+      "synapse-seek-bar",
+      "synapse-volume-slider",
+      "synapse-quality-menu",
+      "synapse-subtitles-menu",
+      "synapse-source-selector",
+      "synapse-next-episode-btn",
+      "synapse-fullscreen-btn"
+    ]
+  },
+  "general_ui_ux_guidelines": [
+    "Strictly dark mode UI: no harsh white cards or backgrounds.",
+    "Do NOT use pure transparent backgrounds for navbars, modals, or player control tooltips. Always use backdrop-blur with semi-opaque dark slate/obsidian (#0f0f14 with opacity).",
+    "Every interactive button, menu item, slider, and input MUST contain explicit hover/active states with visible contrast.",
+    "Custom video controls must feel weighted and responsive with zero latency on toggle.",
+    "Persist video watch time position to localStorage under 'synflix_continue_watching' and allow resume upon opening Synapse Player.",
+    "All interactive elements MUST include data-testid for end-to-end automated testing."
+  ]
+}
